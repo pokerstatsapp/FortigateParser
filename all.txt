@@ -1,0 +1,826 @@
+--------------------- main.py
+
+import sys
+import os
+import json
+from database_handler import FortiGateDatabaseHandler
+from fortigate_parser import FortiGateConfigParser
+
+
+def main(local_file_path, source_file_path):
+    print(f"[INFO] Loading config from: {local_file_path}")
+
+    # === Step 1: Parse configuration ===
+    parser = FortiGateConfigParser()
+    parsed_config = parser.parse_from_file(local_file_path)
+
+    # Debug output
+    print("[DEBUG] Parsed Configuration:")
+    print(json.dumps(parsed_config, indent=2))
+
+    # === Step 2: Prepare file metadata ===
+    source_file = os.path.basename(source_file_path)
+    local_file = local_file_path
+
+    # === Step 3: Initialize DB handler ===
+    db = FortiGateDatabaseHandler()
+
+    # === Step 4: Save core configuration blocks ===
+    db.save_system_global(parsed_config)
+    db.save_system_interface(parsed_config)
+    db.save_firewall_address(parsed_config)
+    db.save_firewall_addrgrp(parsed_config)
+    db.save_firewall_policies(parsed_config)
+    db.save_user_local(parsed_config)
+    db.save_dhcp_servers(parsed_config)
+    db.save_vpn_phase1_interfaces(parsed_config)
+    db.save_vpn_phase2_interfaces(parsed_config)
+
+    # === Step 5: Save config blocks with file tracking ===
+    db.save_firewall_service_custom(parsed_config, source_file, local_file)
+    db.save_router_static(parsed_config, source_file, local_file)
+    db.save_system_admin(parsed_config, source_file, local_file)
+    db.save_firewall_schedule_recurring(parsed_config, source_file, local_file)
+    db.save_firewall_vip(parsed_config, source_file, local_file)
+
+    # === Step 6: Save change log with tracking ===
+    for change in parser.change_log:
+        change["source_file"] = source_file
+        change["local_file"] = local_file
+    db.save_config_changes(parser.change_log)
+
+    # === Step 7: Output confirmation ===
+    db.print_all_data()
+    print("[INFO] Configuration saved to database.")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 3:
+        print("Usage: python main.py <path_to_local_fortigate_config> <path_to_source_fortigate_config>")
+        sys.exit(1)
+
+    local_file_path = sys.argv[1]
+    source_file_path = sys.argv[2]
+    main(local_file_path, source_file_path)
+
+
+
+
+
+
+
+
+
+
+
+
+------------------ database_handler.py
+from sqlalchemy import (
+    create_engine, MetaData, Table, Column, Integer, String, ForeignKey
+)
+from sqlalchemy.orm import sessionmaker
+import datetime
+
+class FortiGateDatabaseHandler:
+    def __init__(self, db_url='sqlite:///fortigate_config.db'):
+        self.engine = create_engine(db_url, echo=False)
+        self.metadata = MetaData()
+
+        self.system_interface = Table(
+            'system_interface', self.metadata,
+            Column('name', String, primary_key=True),
+            Column('ip', String),
+            Column('allowaccess', String),
+            Column('alias', String),
+            Column('source_file', String),
+            Column('local_file', String),
+            Column('created_at', String)
+        )
+
+        self.firewall_address = Table(
+            'firewall_address', self.metadata,
+            Column('name', String, primary_key=True),
+            Column('subnet', String),
+            Column('fqdn', String),
+            Column('source_file', String),
+            Column('local_file', String),
+            Column('created_at', String)
+        )
+
+        self.firewall_addrgrp = Table(
+            'firewall_addrgrp', self.metadata,
+            Column('name', String, primary_key=True),
+            Column('member', String),
+            Column('source_file', String),
+            Column('local_file', String),
+            Column('created_at', String)
+        )
+
+        self.firewall_policies = Table(
+            'firewall_policies', self.metadata,
+            Column('id', Integer, primary_key=True),
+            Column('name', String),
+            Column('srcintf', String),
+            Column('dstintf', String),
+            Column('srcaddr', String),
+            Column('dstaddr', String),
+            Column('service', String),
+            Column('action', String),
+            Column('schedule', String),
+            Column('logtraffic', String),
+            Column('source_file', String),
+            Column('local_file', String),
+            Column('created_at', String)
+        )
+
+        self.vpn_phase1 = Table(
+            'vpn_phase1', self.metadata,
+            Column('name', String, primary_key=True),
+            Column('interface', String),
+            Column('peertype', String),
+            Column('net_device', String),
+            Column('proposal', String),
+            Column('remote_gw', String),
+            Column('psksecret', String),
+            Column('source_file', String),
+            Column('local_file', String),
+            Column('created_at', String)
+        )
+
+        self.vpn_phase2 = Table(
+            'vpn_phase2', self.metadata,
+            Column('name', String, primary_key=True),
+            Column('phase1name', String),
+            Column('proposal', String),
+            Column('pfs', String),
+            Column('replay', String),
+            Column('source_file', String),
+            Column('local_file', String),
+            Column('created_at', String)
+        )
+
+        self.phase2_selectors = Table(
+            'phase2_selectors', self.metadata,
+            Column('vpn_name', String, ForeignKey('vpn_phase2.name')),
+            Column('selector_id', String),
+            Column('src_subnet', String),
+            Column('dst_subnet', String),
+            Column('source_file', String),
+            Column('local_file', String),
+            Column('created_at', String)
+        )
+
+        self.dhcp_servers = Table(
+            'dhcp_servers', self.metadata,
+            Column('id', Integer, primary_key=True),
+            Column('dns_service', String),
+            Column('default_gateway', String),
+            Column('netmask', String),
+            Column('interface', String),
+            Column('timezone_option', String),
+            Column('tftp_server', String),
+            Column('source_file', String),
+            Column('local_file', String),
+            Column('created_at', String)
+        )
+
+        self.ip_ranges = Table(
+            'ip_ranges', self.metadata,
+            Column('dhcp_id', Integer, ForeignKey('dhcp_servers.id')),
+            Column('range_id', String),
+            Column('start_ip', String),
+            Column('end_ip', String),
+            Column('source_file', String),
+            Column('local_file', String),
+            Column('created_at', String)
+        )
+
+        self.user_local = Table(
+            'user_local', self.metadata,
+            Column('username', String, primary_key=True),
+            Column('password', String),
+            Column('type', String),
+            Column('source_file', String),
+            Column('local_file', String),
+            Column('created_at', String)
+        )
+
+        self.system_global = Table(
+            'system_global', self.metadata,
+            Column('setting', String, primary_key=True),
+            Column('value', String),
+            Column('source_file', String),
+            Column('local_file', String),
+            Column('created_at', String)
+        )
+
+        self.config_changes = Table(
+            'config_changes', self.metadata,
+            Column('id', Integer, primary_key=True, autoincrement=True),
+            Column('action', String),
+            Column('object_type', String),
+            Column('object_name', String),
+            Column('new_name', String),
+            Column('source_file', String),
+            Column('local_file', String),
+            Column('timestamp', String)
+        )
+
+        self.firewall_service_custom = Table(
+            'firewall_service_custom', self.metadata,
+            Column('name', String, primary_key=True),
+            Column('protocol', String),
+            Column('tcp_portrange', String),
+            Column('udp_portrange', String),
+            Column('icmp_type', String),
+            Column('icmp_code', String),
+            Column('comment', String),
+            Column('source_file', String),
+            Column('local_file', String),
+            Column('created_at', String)
+        )
+
+        self.router_static = Table(
+            'router_static', self.metadata,
+            Column('id', Integer, primary_key=True),
+            Column('dst', String),
+            Column('gateway', String),
+            Column('device', String),
+            Column('priority', String),
+            Column('distance', String),
+            Column('comment', String),
+            Column('source_file', String),
+            Column('local_file', String),
+            Column('created_at', String)
+        )
+
+        self.system_admin = Table(
+            'system_admin', self.metadata,
+            Column('username', String, primary_key=True),
+            Column('password', String),
+            Column('ssh_public_key1', String),
+            Column('accprofile', String),
+            Column('source_file', String),
+            Column('local_file', String),
+            Column('created_at', String)
+        )
+
+        self.firewall_schedule_recurring = Table(
+            'firewall_schedule_recurring', self.metadata,
+            Column('name', String, primary_key=True),
+            Column('start', String),
+            Column('end', String),
+            Column('day', String),
+            Column('source_file', String),
+            Column('local_file', String),
+            Column('created_at', String)
+        )
+
+        self.metadata.create_all(self.engine)
+        self.Session = sessionmaker(bind=self.engine)
+
+    def save_config_changes(self, change_log):
+        session = self.Session()
+        try:
+            for change in change_log:
+                session.execute(self.config_changes.insert().values(
+                    action=change.get("action"),
+                    object_type=change.get("object_type"),
+                    object_name=change.get("object_name"),
+                    new_name=change.get("new_name"),
+                    source_file=change.get("source_file"),
+                    local_file=change.get("local_file"),
+                    timestamp=change.get("timestamp")
+                ))
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def save_system_global(self, config_dict):
+        session = self.Session()
+        try:
+            session.execute(self.system_global.delete())
+            data = config_dict.get("system global", {})
+            for key, value in data.items():
+                session.execute(self.system_global.insert().values(
+                    setting=key,
+                    value=str(value)
+                ))
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def save_system_interface(self, config_dict):
+        session = self.Session()
+        try:
+            session.execute(self.system_interface.delete())
+            data = config_dict.get("system interface", {})
+            for name, values in data.items():
+                session.execute(self.system_interface.insert().values(
+                    name=name,
+                    ip=values.get("ip"),
+                    allowaccess=" | ".join(values.get("allowaccess", [])),
+                    alias=values.get("alias"),
+                ))
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def save_firewall_address(self, config_dict):
+        session = self.Session()
+        try:
+            session.execute(self.firewall_address.delete())
+            data = config_dict.get("firewall address", {})
+            for name, values in data.items():
+                session.execute(self.firewall_address.insert().values(
+                    name=name,
+                    subnet=values.get("subnet"),
+                    fqdn=values.get("fqdn"),
+                ))
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def save_firewall_addrgrp(self, config_dict):
+        session = self.Session()
+        try:
+            session.execute(self.firewall_addrgrp.delete())
+            data = config_dict.get("firewall addrgrp", {})
+            for name, values in data.items():
+                session.execute(self.firewall_addrgrp.insert().values(
+                    name=name,
+                    member=" | ".join(values.get("member", [])),
+                ))
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def save_user_local(self, config_dict):
+        session = self.Session()
+        try:
+            session.execute(self.user_local.delete())
+            data = config_dict.get("user local", {})
+            for username, values in data.items():
+                session.execute(self.user_local.insert().values(
+                    username=username,
+                    password=values.get("password"),
+                    type=values.get("type"),
+                ))
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def save_firewall_policies(self, config_dict):
+        session = self.Session()
+        try:
+            session.execute(self.firewall_policies.delete())
+            data = config_dict.get("firewall policy", {})
+            for policy_id, values in data.items():
+                session.execute(self.firewall_policies.insert().values(
+                    id=int(policy_id),
+                    name=values.get("name"),
+                    srcintf=values.get("srcintf"),
+                    dstintf=values.get("dstintf"),
+                    srcaddr=values.get("srcaddr"),
+                    dstaddr=values.get("dstaddr"),
+                    service=" | ".join(values.get("service", [])),
+                    action=values.get("action"),
+                    schedule=values.get("schedule"),
+                    logtraffic=values.get("logtraffic"),
+                ))
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def save_vpn_phase1_interfaces(self, config_dict):
+        session = self.Session()
+        try:
+            session.execute(self.vpn_phase1.delete())
+            data = config_dict.get("vpn ipsec phase1-interface", {})
+            for name, values in data.items():
+                session.execute(self.vpn_phase1.insert().values(
+                    name=name,
+                    interface=values.get("interface"),
+                    peertype=values.get("peertype"),
+                    net_device=values.get("net-device"),
+                    proposal=values.get("proposal"),
+                    remote_gw=values.get("remote-gw"),
+                    psksecret=values.get("psksecret"),
+                ))
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def save_vpn_phase2_interfaces(self, config_dict):
+        session = self.Session()
+        try:
+            session.execute(self.vpn_phase2.delete())
+            session.execute(self.phase2_selectors.delete())
+
+            data = config_dict.get("vpn ipsec phase2-interface", {})
+            for name, values in data.items():
+                session.execute(self.vpn_phase2.insert().values(
+                    name=name,
+                    phase1name=values.get("phase1name"),
+                    proposal=values.get("proposal"),
+                    pfs=values.get("pfs"),
+                    replay=values.get("replay"),
+                ))
+                selectors = values.get("phase2selectors", {})
+                for sel_id, sel_vals in selectors.items():
+                    session.execute(self.phase2_selectors.insert().values(
+                        vpn_name=name,
+                        selector_id=sel_id,
+                        src_subnet=sel_vals.get("src-subnet"),
+                        dst_subnet=sel_vals.get("dst-subnet"),
+                    ))
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def save_firewall_service_custom(self, config_dict, source_file, local_file):
+        session = self.Session()
+        try:
+            session.execute(self.firewall_service_custom.delete())
+            services = config_dict.get("firewall service custom", {})
+            for name, values in services.items():
+                session.execute(self.firewall_service_custom.insert().values(
+                    name=name,
+                    protocol=values.get("protocol"),
+                    tcp_portrange=values.get("tcp-portrange"),
+                    udp_portrange=values.get("udp-portrange"),
+                    icmp_type=values.get("icmp-type"),
+                    icmp_code=values.get("icmp-code"),
+                    comment=values.get("comment"),
+                    source_file=source_file,
+                    local_file=local_file,
+                    created_at=datetime.datetime.utcnow().isoformat()
+                ))
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def save_router_static(self, config_dict, source_file, local_file):
+        session = self.Session()
+        try:
+            session.execute(self.router_static.delete())
+            routes = config_dict.get("router static", {})
+            for route_id, values in routes.items():
+                session.execute(self.router_static.insert().values(
+                    id=int(route_id),
+                    dst=values.get("dst"),
+                    gateway=values.get("gateway"),
+                    device=values.get("device"),
+                    priority=values.get("priority"),
+                    distance=values.get("distance"),
+                    comment=values.get("comment"),
+                    source_file=source_file,
+                    local_file=local_file,
+                    created_at=datetime.datetime.utcnow().isoformat()
+                ))
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def save_system_admin(self, config_dict, source_file, local_file):
+        session = self.Session()
+        try:
+            session.execute(self.system_admin.delete())
+            admins = config_dict.get("system admin", {})
+            for username, values in admins.items():
+                session.execute(self.system_admin.insert().values(
+                    username=username,
+                    password=values.get("password"),
+                    ssh_public_key1=values.get("ssh-public-key1"),
+                    accprofile=values.get("accprofile"),
+                    source_file=source_file,
+                    local_file=local_file,
+                    created_at=datetime.datetime.utcnow().isoformat()
+                ))
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def save_firewall_schedule_recurring(self, config_dict, source_file, local_file):
+        session = self.Session()
+        try:
+            session.execute(self.firewall_schedule_recurring.delete())
+            schedules = config_dict.get("firewall schedule recurring", {})
+            for name, values in schedules.items():
+                session.execute(self.firewall_schedule_recurring.insert().values(
+                    name=name,
+                    start=values.get("start"),
+                    end=values.get("end"),
+                    day=" | ".join(values.get("day", [])),
+                    source_file=source_file,
+                    local_file=local_file,
+                    created_at=datetime.datetime.utcnow().isoformat()
+                ))
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def save_dhcp_servers(self, config_dict):
+        dhcp_data = config_dict.get("dhcp server", {})
+        session = self.Session()
+        try:
+            session.execute(self.dhcp_servers.delete())
+            session.execute(self.ip_ranges.delete())
+            for dhcp_id, dhcp_config in dhcp_data.items():
+                session.execute(self.dhcp_servers.insert().values(
+                    id=int(dhcp_id),
+                    dns_service=dhcp_config.get("dns-service"),
+                    default_gateway=dhcp_config.get("default-gateway"),
+                    netmask=dhcp_config.get("netmask"),
+                    interface=dhcp_config.get("interface"),
+                    timezone_option=dhcp_config.get("timezone-option"),
+                    tftp_server=dhcp_config.get("tftp-server")
+                ))
+
+                ip_ranges = dhcp_config.get("ip-range", {})
+                for range_id, range_data in ip_ranges.items():
+                    session.execute(self.ip_ranges.insert().values(
+                        dhcp_id=int(dhcp_id),
+                        range_id=range_id,
+                        start_ip=range_data.get("start-ip"),
+                        end_ip=range_data.get("end-ip")
+                    ))
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def save_firewall_vip(self, config_dict, source_file, local_file):
+        session = self.Session()
+        try:
+            session.execute(self.firewall_vip.delete())
+            vips = config_dict.get("firewall vip", {})
+            for name, values in vips.items():
+                session.execute(self.firewall_vip.insert().values(
+                    name=name,
+                    extip=values.get("extip"),
+                    extintf=values.get("extintf"),
+                    mappedip=values.get("mappedip"),
+                    portforward=values.get("portforward"),
+                    protocol=values.get("protocol"),
+                    extport=values.get("extport"),
+                    mappedport=values.get("mappedport"),
+                    source_file=source_file,
+                    local_file=local_file,
+                    created_at=datetime.datetime.utcnow().isoformat()
+                ))
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def generate_change_report(self):
+        from collections import defaultdict
+        from sqlalchemy import text
+
+        with self.engine.connect() as conn:
+            result = conn.execute(text("SELECT source_file, action FROM config_changes"))
+            summary = defaultdict(lambda: defaultdict(int))
+
+            for row in result:
+                summary[row.source_file][row.action] += 1
+
+            print("\n[CHANGE REPORT SUMMARY]")
+            for source_file, actions in summary.items():
+                print(f"\nSource: {source_file}")
+                for action, count in actions.items():
+                    print(f"  {action}: {count}")
+
+    def print_all_data(self):
+        session = self.Session()
+        try:
+            for table in self.metadata.sorted_tables:
+                print(f"\n--- {table.name} ---")
+                results = session.execute(table.select()).mappings().all()
+                for row in results:
+                    print(dict(row))
+        finally:
+            session.close()
+
+
+
+
+
+
+
+
+
+
+
+
+
+---------------------- fortigate_parser.py
+import re
+import json
+from collections import defaultdict
+from sqlalchemy import create_engine, Table, Column, Integer, String, MetaData, Text, ForeignKey
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.dialects.sqlite import insert
+
+class FortiGateConfigParser:
+    def __init__(self):
+        self.config = {}
+        self.stack = []
+        self.change_log = []
+        self.current_file = ""
+
+    def _get_nested_dict(self):
+        d = self.config
+        for key in self.stack:
+            d = d.setdefault(key, {})
+        return d
+
+    def _normalize_value(self, key, value):
+        list_keys = {
+            "member", "service", "allowaccess", "dns-server",
+            "ntp-server", "dnsfilter-profile", "ssh-filter-profile",
+            "ipv6-address", "groups"
+        }
+        value = value.strip('"')
+        if key in list_keys:
+            return [v.strip('"') for v in value.split()]
+        return value
+
+    def _assign_value(self, key, value):
+        current_dict = self._get_nested_dict()
+        current_dict[key] = value
+
+    def save_system_global(self, config_dict):
+        session = self.Session()
+        try:
+            data = config_dict.get("system global", {})
+            if not data:
+                return
+            session.execute(self.global_settings.insert().values(
+                hostname=data.get("hostname"),
+                timezone=data.get("timezone"),
+                admintimeout=data.get("admintimeout"),
+                alias=" | ".join(data.get("alias", [])) if isinstance(data.get("alias"), list) else data.get("alias")
+            ))
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def parse_line(self, line):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            return
+
+        if line.startswith("config "):
+            block = line.split("config ", 1)[1].strip()
+            self.stack.append(block)
+
+        elif line.startswith("edit "):
+            context = line.split("edit ", 1)[1].strip().strip('"')
+            current_dict = self._get_nested_dict()
+            self.stack.append(context)
+            current_dict.setdefault(context, {})
+
+        elif line.startswith("set "):
+            parts = line.split(None, 2)
+            if len(parts) == 2:
+                key, value = parts[1], ""
+            else:
+                _, key, value = parts
+            value = self._normalize_value(key, value)
+            self._assign_value(key, value)
+
+        elif line.startswith("unset "):
+            key = line.split("unset ", 1)[1].strip()
+            current_dict = self._get_nested_dict()
+            current_dict.pop(key, None)
+
+        elif line.startswith("delete "):
+            entry = line.split("delete ", 1)[1].strip()
+            current_dict = self._get_nested_dict()
+            current_dict.pop(entry, None)
+
+        elif line.startswith("rename "):
+            parts = line.split()
+            if len(parts) == 3:
+                old, new = parts[1], parts[2]
+                current_dict = self._get_nested_dict()
+                if old in current_dict:
+                    current_dict[new] = current_dict.pop(old)
+
+        elif line == "next":
+            if self.stack:
+                self.stack.pop()
+
+        elif line == "end":
+            if self.stack:
+                self.stack.pop()
+
+        elif line.startswith("unset "):
+            key = line.split("unset ", 1)[1].strip()
+            current_dict = self._get_nested_dict()
+            current_dict.pop(key, None)
+            self.change_log.append({
+                "action": "unset",
+                "object_type": self.stack[-1] if self.stack else "global",
+                "object_name": key,
+                "new_name": None,
+                "source_file": self.current_file,
+                "timestamp": datetime.datetime.utcnow().isoformat()
+            })
+
+        elif line.startswith("delete "):
+            entry = line.split("delete ", 1)[1].strip()
+            current_dict = self._get_nested_dict()
+            current_dict.pop(entry, None)
+            self.change_log.append({
+                "action": "delete",
+                "object_type": self.stack[-1] if self.stack else "global",
+                "object_name": entry,
+                "new_name": None,
+                "source_file": self.current_file,
+                "timestamp": datetime.datetime.utcnow().isoformat()
+            })
+
+        elif line.startswith("rename "):
+            parts = line.split()
+            if len(parts) == 3:
+                old, new = parts[1], parts[2]
+                current_dict = self._get_nested_dict()
+                if old in current_dict:
+                    current_dict[new] = current_dict.pop(old)
+                    self.change_log.append({
+                        "action": "rename",
+                        "object_type": self.stack[-1] if self.stack else "global",
+                        "object_name": old,
+                        "new_name": new,
+                        "source_file": self.current_file,
+                        "timestamp": datetime.datetime.utcnow().isoformat()
+                    })
+
+    def parse_config(self, lines):
+        for line in lines:
+            self.parse_line(line)
+        return self.config
+
+    def parse_from_file(self, filepath):
+        self.current_file = filepath.split('/')[-1]
+        with open(filepath, 'r') as f:
+            lines = f.readlines()
+        return self.parse_config(lines)
+
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) < 2:
+        print("Usage: python fortigate_config_parser.py <config_file_path>")
+    else:
+        parser = FortiGateConfigParser()
+        config = parser.parse_from_file(sys.argv[1])
+        print(json.dumps(config.get("system dhcp server", {}), indent=2))
